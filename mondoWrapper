@@ -1,0 +1,1153 @@
+#!/bin/bash  
+
+
+#
+#
+# mondoWrapper v 2.1
+# Added the ipxe configuration part
+# Added the ipxe dipsatcher in boot script
+# now 3 methods are supported
+# - grubpxe
+# - pxelinux
+# - ipxe
+# This script is intended to be a wrapper for MDT and tftp server.
+# It runs on drbl server
+# It manage the  postinstall script file , set mirror and ilo address on Proliant and finally it write the boot file in tftp directory
+# It accepts arguments from DB and is run totally from a daemon that check periodically for machine job
+# The script can be run manually, it accepts a minimum of two arguments: 
+# - ISO name (as in /lysis dir)
+# - Rack position or directly the ip address of client (need to be know)
+# 
+# Debug:
+# code 299 no clients found on rack position declared
+# Author ACS 2014
+
+
+#Source the DRBL functions dir
+
+DRBL_SCRIPT_PATH="${DRBL_SCRIPT_PATH:-/usr/share/drbl/bin}"
+SERVER="10.0.129.101"
+isoPATH="/lysis"
+BOOTFOLDER="/tftpboot/nbi_img/redhat"
+WWWBOOT="/var/www/BOOT"
+MGT="10.0.205.204"
+#Define the web services where to send events
+#the form is WEB1, WEB2, WEB(n)
+#Add the perl section for each service in 'log' function
+nocheck=0
+WEB1="http://chx-sysprod-01/RESTGwy/portal.php/writeevent"
+
+# Gets the cyclades and swithes values from DB
+getEnv() {
+
+Rack=$(echo $rackPosition | awk -F "_" '{print $1}')
+Shelf=$(echo $rackPosition | awk -F "_" '{print $2}')
+Rack=$(echo $Rack | sed 's/[^0-9]//g')
+#Rack=$(echo  "${Rack##${Rack%%?}}")
+Shelf=$(echo  "${Shelf##${Shelf%%?}}")
+
+
+log INFO "About to download env values from http://10.0.205.204/SPOT/provisioning/api/sysprodracksmappings?Rack_Equals=$Rack&Shelf_Equals=$Shelf"
+
+URI="http://10.0.205.204/SPOT/provisioning/api/sysprodracksmappings?Rack_Equals=$Rack&Shelf_Equals=$Shelf"
+results=$(
+perl - "$URI"  <<'_HERE_'
+use Time::Piece;
+use integer;
+use POSIX qw(strftime);
+use Backticks;
+use Data::Dumper;
+use Sys::Hostname;
+use Socket;
+use LWP::UserAgent;
+use LWP::Simple;
+use strict;
+use warnings;
+use integer;
+use Switch;
+use JSON ;
+use feature qw(switch);
+use HTTP::Cookies;
+use HTTP::Request;
+use LWP;
+use File::Path qw{mkpath};
+
+my $WEB = shift;
+my $lwp = LWP::UserAgent->new(
+                        timeout               => 10,
+);
+my $req = HTTP::Request->new( 'GET', "$WEB" );
+my $resp = $lwp->request($req);
+my $decoded = decode_json($resp->content);
+#my %recursive = ( $decoded->{rows} );
+#print $req->as_string;
+#print Dumper $resp;
+#print Dumper $decoded->{rows}->[0]->{switchip};
+my $switchip = $decoded->{rows}->[0]->{switchip};
+my $bootpip = $decoded->{rows}->[0]->{bootpip};
+my $cycladesip = $decoded->{rows}->[0]->{cycladesip};
+my $cycladesport = $decoded->{rows}->[0]->{cycladesport};
+my $switchport = $decoded->{rows}->[0]->{switchport};
+my $rack = $decoded->{rows}->[0]->{rack};
+my $shelf = $decoded->{rows}->[0]->{shelf};
+print "$switchip\n$bootpip\n$cycladesip\n$cycladesport\n$switchport\n$rack\n$shelf\n";
+_HERE_
+)
+#> /dev/null 2>&1
+counter=1
+for i in $results
+do
+case $counter in
+1) switchip=$i;;
+2) bootpip=$i;;
+3) cycladesip=$i;;
+4) cycladesport=$i;;
+5) switchport=$i;;
+6) rack=$i;;
+7) shelf=$i;;
+esac
+counter=$(($counter + 1))
+done
+#Prepare the string for parsing
+CYCLADES="rack"$rack"_shelf$shelf $cycladesip:$cycladesport"
+case $rack in
+2) switch_maps="rack$rack $switchip
+shelf$rack$shelf $switchport"
+;;
+*) switch_maps="rack$rack $switchip
+shelf$shelf $switchport"
+;;
+esac
+
+log INFO "The env values for cyclades are $CYCLADES and for switches $switch_maps"
+}
+
+
+
+# Usage function
+usage () {
+log INFO "usage $0 
+-pos [rack_shelf | client ip]
+-g [default gateway]
+-h [hostname]
+-t [ISO name]
+-ip [ip address]
+-n [netmask]
+-s [sales order number]
+-iloip [ilo ip address]
+-ilonm [ilo netmask]"
+log INFO "Only 2 parameter are mandatory: -pos [rack_shelf | client IP] -t [ISO name]"
+log INFO "The parameter -pos can specify either the rack shelf position and directly the ip client (usefull to install visrtual machines)"
+log WARN "Note that if the server is a Proliant, the mirror is automatically built if two disks are found"
+log WARN "If only one argument is given [-pos rackposition] it checks for the existance of the pxe client"
+
+check_args
+}
+
+# Checks if the mandatory arguments are all here
+check_args() {
+#put here the mandatory params
+([[ -z "$ISO"  || -z "$rackPosition" ]] ) && rackPosition="usage" && log ERROR "Some mandatory parameters missing!!!!!" && log INFO "Type $0 without arguments to grab usage." && exit 1
+ valid_ip $ipaddress && [ "$ERROR" -ne 0 ] && log ERROR "Ip address not valid" && exit 1
+ valid_ip $netmask && [ "$ERROR" -ne 0 ] && log ERROR "Netmask not valid" && exit 1
+ valid_ip $gateway && [ "$ERROR" -ne 0 ] && log ERROR "Gateway not valid" && exit 1
+ [[ ! -f $isoPATH/$ISO ]] && log ERROR "The image $ISO doesn't exist, please check the name" && log INFO "Possible values are:`ls $isoPATH | grep iso`" &&  exit 1
+ #check valid client
+nimclient=`ssh 10.0.205.205 lsnim -c machines | grep $rackPosition`
+valid_ip $rackPosition
+ [[ -z "$nimclient" ]] &&  [ $ERROR -ne 0 ]   && log ERROR "Hey, this client doesn't exists ...! check your spelling" && exit 1
+
+}
+create_sym_link () {
+log INFO "Creating symbolic link $ISO ->  mondorescue-1.iso"
+ln -sf $isoPATH/$ISO "$isoPATH/mondorescue-1.iso"
+
+}
+take_date () {
+echo $(date +"%s")
+}
+
+destroyDisks () {
+clientIP=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+log WARN "About to clean all partitions on local disk(s)................."
+sshExe $clientIP "destroyDisks" 2>&1 >/dev/null
+log INFO "Finish cleaning local disk(s)"
+}
+
+
+
+# Function to find ip address or mac address of given rack shelf
+# should be called with a rack shelf and kind of value you want to find as argument
+
+findIPMAC () {
+rack=$1
+value=$2
+
+#check if rack caontains an ip address 
+#if so, we can continue directly to grab the MAC if asked
+valid_ip $rack 
+if [ "$ERROR" -eq 0 ]; then 
+ip_client=$rack
+client_mac=$(arp -n | grep -w "$ip_client" |  awk '{print $3}')
+if [[ -z "$client_mac" ]]; then
+log ERROR "I didn't find any client mac address for IP: $rack!"
+exit 1
+fi
+client_mac=`echo "${client_mac,,}"`
+if [[ "$value" == "IP" ]]; then
+                                                        echo  -e  $ip_client \\n
+                                                        else
+                                                                if [[ "$value" == "MAC" ]]; then
+                                                                echo -e $client_mac \\n
+                                                                else
+                                                                log ERROR "MANDATORY param $value is missing or not valid"
+                                                                fi
+                                                        fi
+
+
+else
+
+switch=$(echo $rack | awk -F "_" '{print $1}')
+floor=$(echo $rack | awk -F "_" '{print $2}')
+# end of data collection
+
+# begin of switch_maps parsing
+
+switch_ip=$(echo "$switch_maps" | grep -w "$switch" | awk  '{print $2}')
+# this needed to map switch 2 as it is different from the others
+        if [[ "$switch" == "rack2" ]] ; then floor=`echo $floor | sed 's/...../&2/g;s/2$//'` ; fi
+switch_port=$(echo "$switch_maps" | grep $floor | awk  '{print $2}')
+# end switch map parsing
+# find the macs connected:
+client_mac=$(perl /usr/sbin/switchlabel.pl $switch_ip public | grep -w "port $switch_port" | awk '{print $2}' )
+# transform lowercase for arp output
+if [[ -z "$client_mac" ]]; then
+log ERROR "I didn't find any client on the rack shelf: $rackPosition!"
+exit 1
+fi
+client_mac=`echo "${client_mac,,}"`
+#echo $client_mac
+# find the ip for the client
+        if [[ ! "$client_mac" == "" ]]; then
+                for i in $client_mac; do
+                ip_client=`arp -n | grep  -w "$i" | awk '{print $1}'`
+                        if  [[ ! "$ip_client" == "" &&  ! "$ip_client_ctrl" =~ "$ip_client" ]]; then
+                        for b in $ip_client; do
+                        sshpass -p Superuser  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 root@$b exit  >> /dev/null 2>&1
+                        if [ $? -eq 0 ]; then
+							if [[ "$value" == "IP" ]]; then
+							echo  -e  $b \\n
+							else
+								if [[ "$value" == "MAC" ]]; then
+								echo -e $i \\n
+								else
+								log ERROR "MANDATORY param $value is missing or not valid"
+								fi
+							fi
+                        fi
+                        done
+                        ip_client_ctrl=$ip_client_ctrl" "$ip_client
+                        fi
+                done
+        else
+        return 1
+        fi
+fi
+}
+
+findIPMACPOST () {
+rack=$1
+value=$2
+
+#check if rack caontains an ip address
+#if so, we can continue directly to grab the MAC if asked
+valid_ip $rack
+if [ "$ERROR" -eq 0 ]; then
+ip_client=$rack
+client_mac=$(arp -n | grep -w "$ip_client" |  awk '{print $3}')
+if [[ -z "$client_mac" ]]; then
+exit 1
+fi
+client_mac=`echo "${client_mac,,}"`
+if [[ "$value" == "IP" ]]; then
+                                                        echo  -e  $ip_client \\n
+                                                        else
+                                                                if [[ "$value" == "MAC" ]]; then
+                                                                echo -e $client_mac \\n
+                                                                fi
+                                                        fi
+
+
+else
+
+switch=$(echo $rack | awk -F "_" '{print $1}')
+floor=$(echo $rack | awk -F "_" '{print $2}')
+# end of data collection
+
+# begin of switch_maps parsing
+
+switch_ip=$(echo "$switch_maps" | grep -w "$switch" | awk  '{print $2}')
+# this needed to map switch 2 as it is different from the others
+        if [[ "$switch" == "rack2" ]] ; then floor=`echo $floor | sed 's/...../&2/g;s/2$//'` ; fi
+switch_port=$(echo "$switch_maps" | grep $floor | awk  '{print $2}')
+# end switch map parsing
+# find the macs connected:
+client_mac=$(perl /usr/sbin/switchlabel.pl $switch_ip public | grep -w "port $switch_port" | awk '{print $2}' )
+# transform lowercase for arp output
+if [[ -z "$client_mac" ]]; then
+exit 1
+fi
+client_mac=`echo "${client_mac,,}"`
+#echo $client_mac
+# find the ip for the client
+        if [[ ! "$client_mac" == "" ]]; then
+                for i in $client_mac; do
+                ip_client=`arp -n | grep  -w "$i" | awk '{print $1}'`
+                        if  [[ ! "$ip_client" == "" &&  ! "$ip_client_ctrl" =~ "$ip_client" ]]; then
+                        for b in $ip_client; do
+                        sshpass -p Superuser  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 root@$b exit  >> /dev/null 2>&1
+                        if [ $? -eq 0 ]; then
+                                                        if [[ "$value" == "IP" ]]; then
+                                                        echo  -e  $b \\n
+                                                        else
+                                                                if [[ "$value" == "MAC" ]]; then
+                                                                echo -e $i \\n
+                                                                fi
+                                                        fi
+                        fi
+                        done
+                        ip_client_ctrl=$ip_client_ctrl" "$ip_client
+                        fi
+                done
+        else
+        return 1
+        fi
+fi
+}
+
+
+
+
+#Function log for better printing
+
+log() {
+local level=${1?}
+shift
+local code= line="[$(date '+%F %T')] $level: $*"
+if [ -t 2 ]
+then
+case "$level" in
+INFO) code=36 ;;
+DEBUG) code=30 ;;
+WARN) code=33 ;;
+ERROR) code=31 ;;
+*) code=37 ;;
+esac
+echo -e "\e[${code}m${line}\e[0m"
+else
+echo "$line"
+fi >&2
+
+#LOG to web services
+#Create one section for each web service
+
+REST='{"title":"mondoWrapper | '$rackPosition'","content":"'$line'","userid":"'`whoami`'","date":"'`date`'"}'
+(
+perl - "$REST"  <<'_HERE_'
+use integer;
+use POSIX qw(strftime);
+use Backticks;
+use Data::Dumper;
+use Sys::Hostname;
+use Socket;
+use LWP::UserAgent;
+use LWP::Simple;
+use strict;
+use warnings;
+use integer;
+use Switch;
+use JSON ;
+use feature qw(switch);
+use HTTP::Cookies;
+use HTTP::Request;
+use LWP;
+use File::Path qw{mkpath};
+my $uri = "http://10.0.205.204/SPOT/provisioning/api/events";
+my $REST = shift;
+my $lwp = LWP::UserAgent->new(
+                        timeout               => 10,
+);
+my $req = HTTP::Request->new( 'POST', "$uri" );
+$req->content($REST);
+my $resp = $lwp->request($req);
+print $req->as_string;
+#print Dumper $resp;
+_HERE_
+)  2>&1 >/dev/null
+
+if [[ ! -z $rackPosition && ! -z $salesOrder ]]; then createMonitorRecord "$line"; fi
+
+}
+
+
+
+# Function to count interfaces on system
+
+countInt () {
+Results=$(sshExe $1 "cat /proc/net/dev | grep eth  |wc -l")
+# force integer value
+INT=$(echo $Results | sed 's/[^0-9]*//g')
+echo $INT
+}
+
+#copy  initrd and vmlinuz from ISO if not already there
+
+
+copyBootFiles () {
+
+namePrefix=$1
+vmlinuz=$namePrefix
+initrd=$namePrefix"_initrd.img"
+log INFO "Cheking if $initrd and $vmlinuz to net boot $ISO exists in $BOOTFOLDER folder"
+if [ ! -f $BOOTFOLDER/$vmlinuz ]  || [ ! -f $BOOTFOLDER/$initrd ]; then
+log WARN "The boot files are not available, going to extract them from iso file"
+log INFO "Mounting the iso $ISO on /mnt/$namePrefix"
+mkdir -p /mnt/$namePrefix
+mount -o loop /$isoPATH/$ISO /mnt/$namePrefix 2>/dev/null
+log INFO "Copying vmlinuz....."
+cp /mnt/$namePrefix/vmlinuz $BOOTFOLDER/$vmlinuz
+log INFO "Copying initrd....."
+cp /mnt/$namePrefix/initrd.img $BOOTFOLDER/$initrd
+
+
+#umount the iso files
+log INFO "Cleaning temporary dirs and files..."
+umount /mnt/$namePrefix
+rm -rf /mnt/$namePrefix
+else
+log INFO "Good! files are already in place"
+fi
+}
+
+#Create pxe boot files
+
+
+
+
+bootPxe () {
+#Get and transform mac for bootfile naming 
+
+MAC=$(findIPMAC $rackPosition "MAC" 2>/dev/null | head -1)
+if [[ $? -eq 1 ]] || [[ -z "$MAC" ]]
+then
+log ERROR "Error trying to get mac address of client on  rack $rackPosition"
+  exit 299
+fi
+clientIP=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+INT=$(countInt $clientIP)
+if [ $INT -eq 8 ]; then
+REST_INT="eth4"
+else
+REST_INT="eth0"
+fi
+image=$(echo "$ISO"  |  cut -d'_' -f 5| sed 's/\(.*\)\-.*/\1/')
+prefix=$(echo "$ISO"  | sed 's/\(.*\)\-.*/\1/')
+MACSyslinux=01-${MAC//:/-}
+MACGrub=01-${MAC}
+bootSyslinux="/tftpboot/nbi_img/pxelinux.cfg/$MACSyslinux"
+bootGrub="/tftpboot/nbi_img/pxelinux.cfg/$MACGrub"
+bootIpxe="$WWWBOOT/$MAC"
+copyBootFiles $image
+
+syslinuxCFG="
+default vesamenu.c32
+timeout 70
+prompt 0
+noescape 1
+MENU MARGIN 5
+MENU BACKGROUND nagra.jpg
+# Set the color for unselected menu item and timout message
+MENU COLOR UNSEL 7;32;41 #c0000090 #00000000
+MENU COLOR TIMEOUT_MSG 7;32;41 #c0000090 #00000000
+MENU COLOR TIMEOUT 7;32;41 #c0000090 #00000000
+MENU COLOR HELP 7;32;41 #c0000090 #00000000
+say **********************************************
+say Welcome to MONDORESTORE.
+say Booting in mondorestore nuke mode
+say **********************************************
+# Allow client to edit boot parameters
+ALLOWOPTIONS 1
+# simple menu title
+MENU TITLE NAGRAVISION (http://www.nagra.com)
+label  $ISO 
+MENU DEFAULT
+MENU LABEL  $ISO
+kernel /redhat/$image
+initrd /redhat/"$image"_initrd.img
+append load_ramdisk=1 ramdisk_size=16781312 prefix=$prefix ramdisk_blocksize=1024 rw root=/dev/ram iso acpi=off apm=off devfs=nomount exec-shield=0 pxe RESTORE ipconf=$REST_INT:dhcp netfsmount=$SERVER:$isoPATH post=/tmp/isodir/p
+TEXT HELP
+Boot MONDORESTORE via nfs network
+If you need to edit boot parameter use tab key
+ENDTEXT 
+"
+#grubCFG="
+#menuentry $ISO --class fedora {
+#set root=http,10.0.129.101
+#echo 'Loading Kernel .....'
+#linux /redhat/$image load_ramdisk=1 prefix=$prefix ramdisk_size=16781312 rw root=/dev/ram iso acpi=off apm=off devfs=nomount exec-shield=0 pxe RESTORE ipconf=$REST_INT:dhcp netfsmount=$SERVER:$isoPATH post=/tmp/isodir/p
+#echo 'Loading Initrd... '
+#initrd /redhat/"$image"_initrd.img
+#}
+#"
+### TESTING
+
+grubCFG="
+menuentry $ISO --class fedora {
+#set root=http,10.0.129.101
+echo 'Loading Kernel .....'
+linux /redhat/$image load_ramdisk=1 prefix=$prefix ramdisk_size=16781312 rw root=/dev/ram iso acpi=off devfs=nomount exec-shield=0 pxe RESTORE ipconf=$REST_INT:dhcp netfsmount=$SERVER:$isoPATH post=/tmp/isodir/p
+echo 'Loading Initrd... '
+initrd /redhat/"$image"_initrd.img
+}
+"
+ipxeCFG='
+<?php
+echo "  item --key r '$ISO'   (r)'$ISO' \n";
+echo "  item\n";
+echo "  choose --default '$ISO' --timeout 30000 target && goto \${target} || goto cancelled\n";
+echo "  :'$ISO'  \n";
+echo "  initrd \${remote-root}\${remote-files}/redhat/'$image'_initrd.img\n";
+echo "  chain  \${remote-root}\${remote-files}/redhat/'$image' load_ramdisk=1 prefix='$prefix' ramdisk_size=16781312 rw root=/dev/ram iso acpi=off devfs=nomount exec-shield=0 pxe RESTORE ipconf='$REST_INT':dhcp netfsmount='$SERVER':'$isoPATH' post=/tmp/isodir/p\n";
+echo "  boot || goto failed\n";
+echo " :failed\n";
+$jsonDash = array("status" => "BOOT FAILED!!! May be some files has not been found. Check within a KVM", "progress" => "0");
+updateDashboard($jsonDash);
+?>
+'
+
+#Create the boot files
+echo "$syslinuxCFG" > $bootSyslinux
+echo "$grubCFG" > $bootGrub
+echo "$ipxeCFG" > $bootIpxe
+}
+
+#Fucntion to create the confnet files for clients
+
+createConfnet () {
+
+
+#Get and transform mac address uppercase
+MAC=$(findIPMAC $rackPosition "MAC" 2>/dev/null | head -1)
+
+if [[ $? -eq 1 ]] || [[ -z "$MAC" ]]
+then
+log ERROR "Error trying to get mac address of client on  rack $rackPosition"
+  exit 299
+fi
+
+BROADCAST=$(ipcalc $ipaddress/$netmask | grep Broadcast | awk '{print $2}')
+NETWORK=$(ipcalc $ipaddress/$netmask | grep Network | awk '{print $2}' | awk -F "/" '{print $1}')
+confnetFile="$isoPATH/$MAC"
+data=`date`
+
+confnetContent="
+#!/bin/bash
+echo '===================================================================================='
+echo '=========                                                                   ========'
+echo '=========                DRBL postinstall environment                       ========'
+echo '=========       customisation script for '$rackPosition' '$hostname'        ========'
+echo '=========                                                                   ========'
+echo '=========                *****************************                      ========'
+echo '=========                *****************************                      ========'
+echo '=========                *****************************                      ========'
+echo '=========                *****************************                      ========'
+echo '=========                                                                   ========'
+echo '===================================================================================='
+cat > /etc/sysconfig/network << EOF
+NETWORKING=yes
+NETWORKING_IPV6=no
+HOSTNAME=$hostname
+GATEWAY=$gateway
+EOF
+
+cat > /etc/sysconfig/network-scripts//ifcfg-eth0 << EOF
+DEVICE=eth0
+BOOTPROTO=static
+BROADCAST=$BROADCAST
+IPADDR=$ipaddress
+NETMASK=$netmask
+GATEWAY=$gateway
+NETWORK=$NETWORK
+ONBOOT=yes
+EOF
+
+
+cat > /etc/resolv.conf << EOF
+#
+#
+#      This file has been emptied by the post instal script to avoid unuseful behaviors
+#
+#
+#
+domain localdomain
+EOF
+
+echo $ipaddress $hostname'.localdomain' $hostname >> /etc/hosts
+echo $gateway'      time' >> /etc/hosts
+echo 'time' >> /etc/ntp/step-tickers
+echo 'server time' >> /etc/ntp.conf
+service ntpd restart
+sleep 5
+
+
+#@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        Added for NET
+#echo '10.0.139.1	mlds01.localdomain' >> /etc/hosts
+#cp /etc/rc.local /etc/rc.local.save
+#echo '/etc/installpuppet' >> /etc/rc.local
+
+
+
+#cat > /etc/installpuppet << EOF
+##!/bin/bash
+#bash <(curl -s http://mlds01.localdomain:8080/installpuppet.sh)  
+#mv /etc/rc.local.save /etc/rc.local
+#rm /etc/installpuppet
+#EOF
+
+#chmod 755 /etc/installpuppet
+
+#@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@		End added for NET
+
+echo Installation number:  $salesOrder performed on $data >> /home/root/.syp_log && /sbin/reboot
+
+"
+
+#Write the confnet file on server
+ACTION=$(echo "$confnetContent" > $confnetFile)
+
+if [[ $? -ne 0 ]] 
+then
+log WARN "Cannot write confnet file for final customisation. Reason: $ACTION"
+else
+chmod +x $confnetFile
+  
+fi
+
+}
+# Scp  function
+scpExe () {
+# $1 client ip
+#
+# $2 source file
+# $3 target file
+# No password required because we run on drbl server
+
+scp -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t $2 root@$1:$3
+if [[ $? -ne 0 ]]
+then
+log ERROR "Cannot scp $2 file to client, every further action will be not possible so I exit right now!"
+exit 299
+fi
+}
+
+
+# Ssh execute function
+
+sshExe() {
+# $1 client ip
+# 
+# $2 command or function
+# No password required because we run on drbl server
+ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t root@$1 " $2"
+if [[ $? -ne 0 ]]
+then
+log ERROR "Execution Error! May be ssh connection problem or execution of command'$2' issue. I will exit now."
+log ERROR "The command was: ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t root@$1 \" $2\""
+exit 299
+fi
+}
+
+# check IP address function
+valid_ip() {
+ERROR=0
+    oldIFS=$IFS
+    IFS=.
+    set -f
+    set -- $1
+    if [ $# -eq 4 ]
+    then
+      for seg
+      do
+        case $seg in
+            ""|*[!0-9]*) ERROR=1;break ;; ## Segment empty or non-numeric char
+            *) [ $seg -gt 255 ] && ERROR=2 ;;
+        esac
+      done
+    else
+      ERROR=3 ## Not 4 segments
+    fi
+    IFS=$oldIFS
+    set +f
+    return $ERROR
+}
+
+#Functions to configure proliant servers 
+
+checkProliant () {
+
+#Get the client IP
+clientIP=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+#check if proliant
+check=$(sshExe $clientIP "dmidecode -s system-product-name | grep  ProLiant ||  echo 'NOK'")
+log WARN "Check Proliant result: $check"
+if [[  "$check" != *"NOK"* ]]; then
+echo "OK"
+else
+echo "NOK"
+fi
+
+}
+
+setILO () {
+
+#Get the client IP
+clientIP=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+ILO_hostname="ILO$hostname"
+ILO_pwd="Superuser"
+ILO_ip=$iloipaddress
+ILO_mask=$ilonetmask
+ILO_gw=$gateway
+log INFO "Settings for ilo are: $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname"
+log INFO "Launching the command sshExe $clientIP /usr/sbin/set_ilo.sh $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname"
+Set=$(sshExe $clientIP "/usr/sbin/set_ilo.sh $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname")
+log INFO "Results for script: $Set"
+}
+
+
+setProliantMirror () {
+#Get the client IP
+clientIP=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+#Check if there are two disks
+declare -i Disks
+Results=`sshExe $clientIP "hpacucli ctrl all  show config | grep physicaldrive | wc -l"`
+Disks=$(echo $Results | sed 's/[^0-9]*//g')
+log INFO "Found $Disks physical disks on system"
+if [[ $Disks -eq 2 ]]; then
+log WARN "Building the mirror"
+Raid=$(sshExe $clientIP "hpacuscripting -reset -i /home/partimag/HPRAIDTEMPLATES/acuoutput1.ini")
+if [ $? -ne 0 ]; then
+	ERR="`cat error.ini`"
+	log WARN "The first applied template gives an error: $ERR . I'm going to apply the second one....."
+	Raid=$(sshExe $clientIP "hpacuscripting -reset -i /home/partimag/HPRAIDTEMPLATES/acuoutput2.ini")
+	if [ $? -ne 0]; then
+		log ERROR "I have two physical disks, but I could'nt build a mirror as asked. I'm exit right now"
+		killall -9 $0
+	fi
+fi
+log INFO "Mirroring done! $Raid"
+fi
+}
+
+SEND () {
+
+
+perl -e '
+use integer;
+use POSIX qw(strftime);
+use Backticks;
+use Data::Dumper;
+use Sys::Hostname;
+use Socket;
+use LWP::UserAgent;
+use LWP::Simple;
+use strict;
+use warnings;
+use integer;
+use Switch;
+use JSON ;
+use feature qw(switch);
+use HTTP::Cookies;
+use HTTP::Request;
+use LWP;
+my $REST = shift;
+my $uri = shift;
+my $lwp = LWP::UserAgent->new(
+                        timeout               => 10,
+);
+my $req = HTTP::Request->new( "PUT", "$uri" );
+$req->content($REST);
+my $resp = $lwp->request($req);
+print $req->as_string;
+#print Dumper $resp;
+' "$REST" "$URI"
+
+
+}
+
+createMonitorRecord () {
+ status="$1"
+ PK="["$salesOrder"]["$rackPosition"]"
+ URI="http://10.0.205.204/SPOT/provisioning/api/provisioningnotifications/$PK"
+
+                            REST="{
+        \"notifid\":\"$PK\",
+        \"hostname\":\"$hostname\",
+        \"installationip\":\"putty://$clientIP\",
+        \"configuredip\":\"$ipaddress\",
+        \"status\":\"<b>$status</b>\",
+        \"progress\":\"$PROGRESS\",
+        \"image\":\"$image\",
+        \"firmware\":\"$MANUFACTURER\",
+        \"ram\":\"$RAM_tot\",
+        \"cpu\":\"$NUMPROC\",
+        \"diskscount\":\"$DISKCOUNT\",
+        \"netintcount\":\"$NETCOUNT\",
+        \"model\":\"$MODEL\",
+        \"serial\":\"$MACHSERIAL\",
+        \"os\":\"RedHat\"
+        }"
+        SEND 2>&1 >/dev/null
+
+}
+# Waiting ssh available to push postinstall script
+waitPostInstall () {
+	log INFO "Waiting for SSH connection to push post install script"
+	PK="["$salesOrder"]["$rackPosition"]"
+	URI="http://10.0.205.204/SPOT/provisioning/api/provisioningnotifications/$PK"
+	COUNTER=0
+        START_WAIT="$( date +%s )"
+	PROGRESS=0
+        NMAP=`which nmap`
+        SSH="sshpass -p Superuser ssh -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -t root"
+        BASESCRIPT="/lysis"
+         # If nc -z is available useit , otherwise use nmap
+        while true; do
+                clientIP=$(findIPMACPOST $rackPosition "IP" 2>/dev/null | head -1)
+                MAC=$(findIPMACPOST $rackPosition "MAC" 2>/dev/null | head -1)
+                if [[ "$clientIP" != "" ]]; then
+		            REST="{
+        \"notifid\":\"$PK\",
+        \"hostname\":\"$hostname\",
+        \"installationip\":\"putty://$clientIP\",
+        \"configuredip\":\"$ipaddress\",
+        \"status\":\"<b>Install in progress</b>\",
+        \"progress\":\"$PROGRESS\",
+        \"image\":\"$image\",
+        \"firmware\":\"$MANUFACTURER\",
+        \"ram\":\"$RAM_tot\",
+        \"cpu\":\"$NUMPROC\",
+        \"diskscount\":\"$DISKCOUNT\",
+        \"netintcount\":\"$NETCOUNT\",
+        \"model\":\"$MODEL\",
+        \"serial\":\"$MACHSERIAL\",
+        \"os\":\"RedHat\"
+        }"
+	SEND 2>&1 >/dev/null
+                         $NMAP -p22 $clientIP | grep -q 'open'  > /dev/null
+                         ret=$(echo $?)
+                         if [ $ret -eq 0 ]; then
+                                break
+                         fi
+                fi
+                #echo -ne "$WAITING_DOTS\r"
+                WAITING_DOTS=".${WAITING_DOTS}"
+                sleep 10
+                TIME_NOW="$( date +%s )"
+                TOTAL_WAIT="$( echo "scale=2; $TIME_NOW - $START_WAIT" | bc )"
+                if [ $TOTAL_WAIT -eq 7200 ]; then
+			 REST="{
+        \"notifid\":\"$PK\",
+        \"hostname\":\"$hostname\",
+        \"installationip\":\"putty://$clientIP\",
+        \"configuredip\":\"$ipaddress\",
+        \"status\":\"<b>I've waited for client to come up about $TOTAL_WAIT, so I can't run the cust script (Sometimes I fail to find the new assign IP). Check if restore is fine  </b>\",
+        \"progress\":\"$PROGRESS\",
+        \"image\":\"$image\",
+        \"firmware\":\"$MANUFACTURER\",
+        \"ram\":\"$RAM_tot\",
+        \"cpu\":\"$NUMPROC\",
+        \"diskscount\":\"$DISKCOUNT\",
+        \"netintcount\":\"$NETCOUNT\",
+        \"model\":\"$MODEL\",
+        \"serial\":\"$MACHSERIAL\",
+        \"os\":\"RedHat\"
+        }"
+			 SEND 2>&1 >/dev/null
+                        log WARN "I've waited for about $TOTAL_WAIT seconds but I couldn't contact the client. I exit right now"
+                        exit 1
+                fi
+        done
+        STOP_WAIT="$( date +%s )"
+
+        TOTAL_WAIT="$( echo "scale=2; $STOP_WAIT - $START_WAIT" | bc )"
+
+        log INFO  "SSH ready (waited for $TOTAL_WAIT seconds)"
+	SCRIPT="$BASESCRIPT/$MAC"
+        log INFO  "I execute right now the postinstall script $SCRIPT on $clientIP client"
+        # SSH commands now needs password because is not a drbl client anymore
+	if [ -f $SCRIPT ]; then
+        	$SSH@$clientIP 'bash -s' <$SCRIPT
+		if [ $? -eq 0 ]; then
+			log INFO "$SCRIPT executed successfully."
+			PROGRESS=100
+			            REST="{
+        \"notifid\":\"$PK\",
+        \"hostname\":\"$hostname\",
+        \"installationip\":\"putty://$clientIP\",
+        \"configuredip\":\"$ipaddress\",
+        \"status\":\"<b>Intallation completed and customisation script run fine!</b>\",
+        \"progress\":\"$PROGRESS\",
+        \"image\":\"$image\",
+        \"firmware\":\"$MANUFACTURER\",
+        \"ram\":\"$RAM_tot\",
+        \"cpu\":\"$NUMPROC\",
+        \"diskscount\":\"$DISKCOUNT\",
+        \"netintcount\":\"$NETCOUNT\",
+        \"model\":\"$MODEL\",
+        \"serial\":\"$MACHSERIAL\",
+        \"os\":\"RedHat\"
+        }"
+	SEND 2>&1 >/dev/null
+		else
+			PROGRESS=99
+			REST="{
+        \"notifid\":\"$PK\",
+        \"hostname\":\"$hostname\",
+        \"installationip\":\"putty://$clientIP\",
+        \"configuredip\":\"$ipaddress\",
+        \"status\":\"<b>The client seems to be restored, but something (may be) goes wrong. Please check!</b>\",
+        \"progress\":\"$PROGRESS\",
+        \"image\":\"$image\",
+        \"firmware\":\"$MANUFACTURER\",
+        \"ram\":\"$RAM_tot\",
+        \"cpu\":\"$NUMPROC\",
+        \"diskscount\":\"$DISKCOUNT\",
+        \"netintcount\":\"$NETCOUNT\",
+        \"model\":\"$MODEL\",
+        \"serial\":\"$MACHSERIAL\",
+        \"os\":\"RedHat\"
+        }"
+	 SEND 2>&1 >/dev/null
+			log ERROR "Something goes wrong while executing $SCRIPT. Check your client $rackPosition"
+			exit 1
+		fi
+	else
+		log ERROR "I didn't found $SCRIPT. Aborting....."
+		exit 1
+	fi
+	
+	
+}
+
+
+inventoryLinux () {
+#Get the client IP
+clientIP=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+
+sshExe $clientIP "
+ftp -n $MGT <<ftpend
+user sysprod sysprod
+passive
+bin
+cd /var/www/pool/inventory/
+get linux_inventory.sh
+ftpend
+chmod a+x linux_inventory.sh
+./linux_inventory.sh > $salesOrder.$rackPosition.$hostname
+ftp -n $MGT <<ftpend
+user sysprod sysprod
+passive
+bin
+cd /var/www/pool/pending/
+put $salesOrder.$rackPosition.$hostname
+ftpend
+" /dev/null 2>&1
+
+}
+
+LINUX_system () {
+HOST=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+CMD="sshExe"
+filename="/var/www/pool/pending/$salesOrder.csv"
+log INFO "Wrting csv file for $hostname in $filename on remote $MGT"
+HOST_NAME=$hostname
+if [ $? -eq 0 ]; then
+        NUMPROC=`$CMD $HOST "cat /proc/cpuinfo | grep \"physical id\" | sort | uniq | wc -l"`
+        MACHSERIAL=`$CMD $HOST "dmidecode -s system-serial-number | grep -v '#'"`
+        MANUFACTURER=`$CMD $HOST "dmidecode -s system-manufacturer | grep -v '#'"`
+        MODELTYPE=""
+	NETCOUNT=`$CMD $HOST "/usr/share/drbl/bin/get-nic-devs | wc -l"`
+        MODEL=`$CMD $HOST "dmidecode -s system-product-name | grep -v '#'"`
+        RAM_tot=`$CMD $HOST "grep MemTotal /proc/meminfo | cut -d':' -f2 | cut -d 'k' -f1"`
+        RAM_tot=`echo "$RAM_tot" | xargs`
+        RAM_tot=`expr $RAM_tot / 1000 `
+
+        NUMPROC=`echo "$NUMPROC" | xargs `
+        MACHSERIAL=`echo "$MACHSERIAL" | xargs`
+        MANUFACTURER=`echo "$MANUFACTURER" | xargs`
+        MODEL=`echo "$MODEL" | xargs`
+	DISKCOUNT=`$CMD $HOST "lsblk -o NAME -i -d -n -e 1,11 | wc -l"`
+        echo "\"$MACHSERIAL\",$HOST_NAME,\"$MANUFACTURER\",\"$MODEL\",\"$MODELTYPE\",$NUMPROC,$RAM_tot,\"$ipaddress\"" | $CMD $MGT " cat >> $filename"
+	# Sanitazing....
+	$CMD $MGT " sed -i "s/
+//g" $filename 2>&1 >/dev/null"
+fi
+}
+
+
+checkRack () {
+if [ $nocheck -eq 0 ]; then
+log INFO "Check if the client $rackPosition is reacheable..."
+RET=145
+#check valid client
+nimclient=`ssh 10.0.205.205 "lsnim -c machines | grep $rackPosition"`
+valid_ip $rackPosition
+ [[ -z "$nimclient" ]] &&  [ $ERROR -ne 0 ]   && log ERROR "Hey, this client doesn't exists ...! check your spelling" && exit 1
+
+clientIP=$(findIPMAC $rackPosition "IP" 2>/dev/null | head -1)
+if [[ "$clientIP" != "" ]]; then
+        ping -c 1 $clientIP 2>&1 > /dev/null
+        PING=$?
+        if [[ $PING -ne 0 ]] ; then
+                RET=144
+                log ERROR "I didn't found any pxe client at/on $rackPosition"
+        else
+                log INFO "Good! the client is a valid pxe client and it is well connected."
+        fi
+else
+        RET=144
+        log ERROR "I didn't found any pxe client at/on $rackPosition"
+fi
+fi
+nocheck=1
+}
+
+if [ $# -eq 0 ]; then
+usage
+fi
+
+#if only tw0 arguments are given we check the existance of this client
+if [ $# -eq 2 ]; then
+        rackPosition=$2
+        checkRack
+        exit $RET
+fi
+
+
+
+#Actually Get the arguments
+
+while :
+do
+    case "$1" in
+	  -pos )
+	  rackPosition="$2" # You may want to check validity of $2
+	  shift 2
+	  ;;
+	  -g )
+	  gateway="$2"   # You may want to check validity of $2
+	  shift 2
+	  ;;
+      -h )
+	  hostname="$2"   # You may want to check validity of $2
+	  shift 2
+	  ;;
+      -t )
+	  ISO="$2"  
+	  shift 2
+	  ;;
+	  -ip )
+	  ipaddress="$2"  
+	  shift 2
+	  ;;
+      -n )
+	  netmask="$2" # You may want to check validity of $2
+	  shift 2
+	  ;;
+	  -r )
+	  release="$2" # You may want to check validity of $2
+	  shift 2
+	  ;;
+	  -s )
+	  salesOrder="$2" # You may want to check validity of $2
+	  shift 2
+	  ;;
+	  -iloip )
+	  iloipaddress="$2"
+	  shift 2
+	  ;;
+	  -ilonm )
+	  ilonetmask="$2"
+	  shift 2
+	  ;;
+*)	break
+;;
+	   esac
+done
+start_time=$(take_date)
+
+#Gets the environmental values from DB
+getEnv
+
+# check the arguments
+# Please note that data is not verified
+check_args
+checkRack
+if [ $RET -ne 145 ]; then
+        exit $RET
+fi
+log INFO "Set defaults value if not specified in command line..."
+# Set the defaults values
+[[ -z "$hostname" ]] && hostname="nagrasrv01"							&& log INFO "Set the hostname to '$hostname'"
+[[ -z "$ipaddress" ]] && ipaddress=$(echo "10.0.133.$((RANDOM%=255))")				&& log INFO "Set the ip address to '$ipaddress'"
+[[ -z "$netmask" ]] && netmask="255.255.255.0"							&& log INFO "Set the netmask to '$netmask'"
+[[ -z "$gateway" ]] && gateway="10.0.133.252"							&& log INFO "Set the gateway to '$gateway'"
+[[ -z "$ilohostname" ]] && ilohostname="ILO$hostname"						&& log INFO "Assuming ilo hostname for proliant server equal to '$ilohostname'"
+[[ -z "$iloipaddress" ]] && iloipaddress=$(echo "10.0.133.$((RANDOM%=255))")			&& log INFO "Assuming ilo ip address for proliant server equal to '$iloipaddress'"
+[[ -z "$ilonetmask" ]] && ilonetmask="255.255.255.0"						&& log INFO "Assuming ilo netmask for proliant server equal to '$ilonetmask'"
+[[ -z "$salesOrder" ]] && salesOrder="99999999"							&& log INFO "Set sales order to '$salesOrder'"
+
+#Creating sym links
+
+create_sym_link
+#Create the boot files
+log INFO "Creating bootfiles for grub and syslinux based on mac address"
+bootPxe
+
+# Create the postinstall file
+log INFO "Creating the postinstall file for further customisation..."
+createConfnet
+destroyDisks
+# Config proliant servers
+log INFO "Checking if the server is a proliant server...."
+proliant=$(checkProliant)
+if [[ "$proliant" == "OK" ]]; then
+#Set ILO configuration
+log INFO "Set the ILO ip"
+
+setILO
+#do the mirror!
+log INFO "Creating the mirror if needed"
+setProliantMirror
+fi
+
+#the SSH execution is assured in the function
+log INFO "Executing Linux Inventory"
+#inventoryLinux
+LINUX_system
+
+log INFO "Prepare to Reboot the client....."
+end_time=$(take_date)
+diff=$(($end_time-$start_time))
+log INFO "Elapsed time for $rackPosition restore job launch: $diff seconds"
+#log INFO "Setting ip alias of sysprod mgt to $gateway"
+
+
+log INFO "Rebooting the client....."
+sshExe $clientIP /sbin/reboot
+
+
+#  Daemonize me!
+waitPostInstall &
+createMonitorRecord "End of wrapper execution. Rebooting to deploy the new operating system"
+# End of file
