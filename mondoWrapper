@@ -23,10 +23,10 @@
 
 PROGNAME=${0##*/}
 VERSION="2.0"
-isoPATH="/lysis"
+isoPATH="/isos"
 ISO_MOUNT_DIR="/media/"
 output_directory="/mnt/RESTORING"
-mount_directory="/lysis"
+mount_directory="/isos"
 PACKAGER="/packager"
 
 mount-me() {
@@ -463,7 +463,7 @@ help_message() {
   Options:
   --help  Display this help message and exit.
   -pos Rack position or DHCP ip address of this client
-  -t  Mondoarchive iso image name (in lysis dir)
+  -t  Mondoarchive iso image name (in isos dir)
   -ip  Ip address to assign after restoration
   -n  Netmask
   -g  Gateway
@@ -647,7 +647,7 @@ sleep 1 # workarounds umount: /mnt/iso: device is busy
 exec_cmd "umount $ISO_MOUNT_DIR"
 
 
-#Umount the lysis directory, we don't need anymore
+#Umount the isos directory, we don't need anymore
 
 sleep 1
 ismounted=$(cat /proc/mounts | grep $isoPATH)
@@ -719,7 +719,7 @@ check_args
 
 log INFO "Set defaults value if not specified in command line..."
 # Set the defaults values
-[[ -z "$hostname" ]] && hostname="nagrasrv01"                                                   && log INFO "Set the hostname to '$hostname'"
+[[ -z "$hostname" ]] && hostname="srv01"                                                   && log INFO "Set the hostname to '$hostname'"
 [[ -z "$ipaddress" ]] && ipaddress=$(echo "10.0.133.$((RANDOM%=255))")                          && log INFO "Set the ip address to '$ipaddress'"
 [[ -z "$netmask" ]] && netmask="255.255.255.0"                                                  && log INFO "Set the netmask to '$netmask'"
 [[ -z "$gateway" ]] && gateway="10.0.133.252"                                                   && log INFO "Set the gateway to '$gateway'"
