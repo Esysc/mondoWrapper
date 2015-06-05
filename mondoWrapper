@@ -1,4 +1,4 @@
-#!/bin/bash
+# !/bin/bash
 # ---------------------------------------------------------------------------
 # mondoWrapper - Restore comopletely mondoarchives to new physical/virtual machines using the existing PXE environment
 
@@ -19,14 +19,17 @@
 
 # Revision history:
 # 2015-04-23 Created by template_generator ver. 3.3
+# Added time server synchronisation part 2015-05-12
+# 2015-06-1  - Added support to GEN 9 servers (removed hpacu* and installed hpssa* )
+# 2015-06-1  - Added  GrubInstall function to refresh grub installation
 # ---------------------------------------------------------------------------
 
 PROGNAME=${0##*/}
-VERSION="2.0"
-isoPATH="/isos"
+VERSION="2.2"
+isoPATH="/lysis"
 ISO_MOUNT_DIR="/media/"
 output_directory="/mnt/RESTORING"
-mount_directory="/isos"
+mount_directory="/lysis"
 PACKAGER="/packager"
 
 mount-me() {
@@ -51,6 +54,22 @@ mount-subroutine-me < $mountlist.sorted
 
 
 }
+
+
+syncTime () {
+step="Synching server time: "
+log INFO "$step current date is `date`"
+log INFO "$step stopping the ntp service..."
+service ntp stop
+log INFO "$step contacting the 10.0.205.204 server ..."
+ntpdate 10.0.205.204
+log INFO "$step setting the hardware clock to UTC"
+hwclock --systohc --utc
+
+
+}
+
+
 
 i-want-my-lvm() {
 SDA1=$1
@@ -242,7 +261,8 @@ echo 'time' >> /etc/ntp/step-tickers
 echo 'server time' >> /etc/ntp.conf
 service ntpd restart
 sleep 5
-
+# To avoid umount crying on busy partition
+service ntpd stop
 
 #@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@        Added for NET
 #echo '10.0.139.1       mlds01.localdomain' >> /etc/hosts
@@ -295,17 +315,17 @@ setProliantMirror () {
 
 #Check if there are two disks
 declare -i Disks
-Results=`hpacucli ctrl all  show config | grep physicaldrive | wc -l`
+Results=`hpssacli ctrl all  show config | grep physicaldrive | wc -l`
 Disks=$(echo $Results | sed 's/[^0-9]*//g')
 log INFO "Found $Disks physical disks on system"
 if [[ $Disks -eq 2 ]]; then
 log WARN "Building the mirror"
-Raid=$(hpacuscripting -reset -i /home/partimag/HPRAIDTEMPLATES/acuoutput1.ini)
+Raid=$(hpssascripting -reset -i /home/partimag/HPRAIDTEMPLATES/hpssascripting1.ini)
 if [ $? -ne 0 ]; then
         ERR="`cat error.ini`"
         log WARN "The first applied template gives an error: $ERR . I'm going to apply the second one....."
-        Raid=$(hpacuscripting -reset -i /home/partimag/HPRAIDTEMPLATES/acuoutput2.ini)
-        if [ $? -ne 0]; then
+        Raid=$(hpassascripting -reset -i /home/partimag/HPRAIDTEMPLATES/acuoutput1.ini)
+        if [ $? -ne 0 ]; then
                 log ERROR "I have two physical disks, but I could'nt build a mirror as asked. I'm exit right now"
                 error_exit "I have two physical disks, but I could'nt build a mirror as asked. I'm exit right now"
         fi
@@ -422,6 +442,22 @@ umount $output_directory/proc
 umount $output_directory/sys
 }
 
+InstallGrub() {
+log INFO "About to install Grub..."
+grub-install --boot-directory=$output_directory/boot/grub /dev/sda
+
+[ ! -d $output_directory/proc ] && mkdir $output_directory/proc
+[ ! -d $output_directory/sys ] && mkdir $output_directory/sys
+mount -t proc none $output_directory/proc
+mount -t sysfs sys $output_directory/sys
+chroot $output_directory /bin/bash -c "grub-install  /dev/sda && exit" && log INFO "Grub installed ok!!!!" || log ERR "Grub installation had errors"
+umount $output_directory/proc
+umount $output_directory/sys
+
+
+
+}
+
 clean_up() { # Perform pre-exit housekeeping
   return
 }
@@ -450,7 +486,7 @@ signal_exit() { # Handle trapped signals
 }
 
 usage() {
-  echo -e "Usage: $PROGNAME [--help] [-pos] [-t] [-ip] [-n] [-g] [-s] [-h] [-pos] [-iloip] [-ilonm]"
+  echo -e "Usage: $PROGNAME [--help] [-pos] [-t] [-ip] [-n] [-g] [-s] [-h] [-iloip] [-ilonm]"
 }
 
 help_message() {
@@ -463,7 +499,7 @@ help_message() {
   Options:
   --help  Display this help message and exit.
   -pos Rack position or DHCP ip address of this client
-  -t  Mondoarchive iso image name (in isos dir)
+  -t  Mondoarchive iso image name (in lysis dir)
   -ip  Ip address to assign after restoration
   -n  Netmask
   -g  Gateway
@@ -647,7 +683,7 @@ sleep 1 # workarounds umount: /mnt/iso: device is busy
 exec_cmd "umount $ISO_MOUNT_DIR"
 
 
-#Umount the isos directory, we don't need anymore
+#Umount the lysis directory, we don't need anymore
 
 sleep 1
 ismounted=$(cat /proc/mounts | grep $isoPATH)
@@ -719,7 +755,7 @@ check_args
 
 log INFO "Set defaults value if not specified in command line..."
 # Set the defaults values
-[[ -z "$hostname" ]] && hostname="srv01"                                                   && log INFO "Set the hostname to '$hostname'"
+[[ -z "$hostname" ]] && hostname="nagrasrv01"                                                   && log INFO "Set the hostname to '$hostname'"
 [[ -z "$ipaddress" ]] && ipaddress=$(echo "10.0.133.$((RANDOM%=255))")                          && log INFO "Set the ip address to '$ipaddress'"
 [[ -z "$netmask" ]] && netmask="255.255.255.0"                                                  && log INFO "Set the netmask to '$netmask'"
 [[ -z "$gateway" ]] && gateway="10.0.133.252"                                                   && log INFO "Set the gateway to '$gateway'"
@@ -730,6 +766,10 @@ log INFO "Set defaults value if not specified in command line..."
 
 
 # Main logic
+
+# contact time server and set the correct soft and hw time
+syncTime
+
 
 clientIP="$(ifconfig | grep -A 1 'eth0' | tail -1 | cut -d ':' -f 2 | cut -d ' ' -f 1)"
 image=$ISO
@@ -826,10 +866,12 @@ createConfnet
 log INFO "Running configuration file in chrooted environment"
 runConfnet
 
-
+# Install Grub
+InstallGrub 
 
 #unmount /mnt/RESTORING
 log INFO "Unmounting the partitions"
+cd /tmp # Just in case
 unmount-me
 
 PROGRESS=100
