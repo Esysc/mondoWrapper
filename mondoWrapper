@@ -1,9 +1,9 @@
-# !/bin/bash
+#!/bin/bash
 # ---------------------------------------------------------------------------
 # mondoWrapper - Restore comopletely mondoarchives to new physical/virtual machines using the existing PXE environment
 
 # Copyright 2015, root <root@drbl01>
-  
+
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
@@ -22,20 +22,22 @@
 # Added time server synchronisation part 2015-05-12
 # 2015-06-1  - Added support to GEN 9 servers (removed hpacu* and installed hpssa* )
 # 2015-06-1  - Added  GrubInstall function to refresh grub installation
+# 2015-06-17 - Removed   hyphens from function nameing convention, replace within underscore
+# 2015-06-18 - Added check permission function to set the setuid on user
 # ---------------------------------------------------------------------------
 
 PROGNAME=${0##*/}
-VERSION="2.2"
+VERSION="2.6"
 isoPATH="/lysis"
 ISO_MOUNT_DIR="/media/"
 output_directory="/mnt/RESTORING"
 mount_directory="/lysis"
 PACKAGER="/packager"
 
-mount-me() {
+mount_me() {
 mountlist=/tmp/tmp/mountlist.txt
 if [ "$#" -ne "0" ] ;then
-    echo "mount-me <no params>"
+    echo "mount_me <no params>"
     echo "...mountlist is assumed to be at $mountlist"
     exit 1
 fi
@@ -45,12 +47,12 @@ if [ ! -f "$mountlist" ] ; then
     exit 1
 fi
 
-paths=`grep -vE " raid |lvm lvm" $mountlist | tr -s ' ' ' ' | cut -d' ' -f2 | sort`
+paths=$(grep -vE " raid |lvm lvm" $mountlist | tr -s ' ' ' ' | cut -d' ' -f2 | sort)
 > $mountlist.sorted
 for i in $paths ; do
     grep " $i " $mountlist >> $mountlist.sorted
 done
-mount-subroutine-me < $mountlist.sorted
+mount_subroutine_me < $mountlist.sorted
 
 
 }
@@ -58,7 +60,7 @@ mount-subroutine-me < $mountlist.sorted
 
 syncTime () {
 step="Synching server time: "
-log INFO "$step current date is `date`"
+log INFO "$step current date is $(date)"
 log INFO "$step stopping the ntp service..."
 service ntp stop
 log INFO "$step contacting the 10.0.205.204 server ..."
@@ -71,15 +73,15 @@ hwclock --systohc --utc
 
 
 
-i-want-my-lvm() {
+i_want_my_lvm() {
 SDA1=$1
 SDA2=$2
 
-echo y | lvm pvcreate -ff $SDA2
+echo y | lvm pvcreate -ff "$SDA2"
 vgscan
 
 #Create and activate the VG's (volume groups).
-vgcreate VolGroup00 -l 0 -p 0 -s 32.00m $SDA2
+vgcreate VolGroup00 -l 0 -p 0 -s 32.00m "$SDA2"
 vgchange -a y VolGroup00
 
 #Finally, create the LV's (logical volumes).
@@ -98,29 +100,66 @@ lvm vgscan
 #Now you may format the LV's:-
 
 mkswap /dev/VolGroup00/swaplv
-ext=`cat /tmp/tmp/mountlist.txt | grep LogVol00 | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/LogVol00
-ext=`cat /tmp/tmp/mountlist.txt | grep usrlv | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/usrlv
-ext=`cat /tmp/tmp/mountlist.txt | grep homelv | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/homelv
-ext=`cat /tmp/tmp/mountlist.txt | grep optlv | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/optlv
-ext=`cat /tmp/tmp/mountlist.txt | grep tmplv | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/tmplv
-ext=`cat /tmp/tmp/mountlist.txt | grep datalv | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/datalv
-ext=`cat /tmp/tmp/mountlist.txt | grep softlv | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/softlv
-ext=`cat /tmp/tmp/mountlist.txt | grep u01lv | awk '{print $3}'`
-mkfs -t $ext /dev/VolGroup00/u01lv
-ext=`cat /tmp/tmp/mountlist.txt | grep $SDA1 | awk '{print $3}'`
-mkfs -t $ext $SDA1
+ext=$(grep LogVol00 < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/LogVol00
+ext=$(grep usrlv < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/usrlv
+ext=$(grep homelv < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/homelv
+ext=$(grep optlv < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/optlv
+ext=$(grep tmplv < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/tmplv
+ext=$(grep datalv < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/datalv
+ext=$(grep softlv < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/softlv
+ext=$(grep u01lv < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" /dev/VolGroup00/u01lv
+ext=$(grep "$SDA1" < /tmp/tmp/mountlist.txt | awk '{print $3}')
+mkfs -t "$ext" "$SDA1"
 
 
 }
+checkPermission() {
+FILES="/bin/ping
+/bin/mount
+/bin/ping6
+/bin/su
+/bin/umount
+/usr/sbin/suexec
+/usr/sbin/userhelper
+/usr/sbin/usernetctl
+/usr/bin/chage
+/usr/bin/newgrp
+/usr/bin/crontab
+/usr/bin/chfn
+/usr/bin/at
+/usr/bin/passwd
+/usr/bin/sudo
+/usr/bin/chsh
+/usr/bin/gpasswd
+/usr/bin/pkexec
+/usr/bin/staprun
+/usr/libexec/pt_chown
+/usr/libexec/openssh/ssh-keysign
+/usr/libexec/polkit-1/polkit-agent-helper-1
+/sbin/mount.nfs
+/sbin/pam_timestamp_check
+/sbin/unix_chkpwd
+/lib64/dbus-1/dbus-daemon-launch-helper"
 
-mount-subroutine-me() {
+for file in $FILES
+do
+log INFO "Setting setuid on file $output_directory/$file"
+chmod u+s "$output_directory/$file" 2>/dev/null
+sleep 1
+done
+
+
+
+}
+mount_subroutine_me() {
 
 echo "mount-subroutine-me --- starting"
 if [ "$#" -ne "0" ] ; then
@@ -130,18 +169,17 @@ fi
 
 # ----------- mount partitions to be restored to --------------
 
-#echo "START mount-me"
+#echo "START mount_me"
 
-errors=0
 
 read incoming
 while [ "$incoming" != "" ] ; do
-    partno=`echo $incoming | cut -d' ' -f1`
-    mountpt=`echo $incoming | cut -d' ' -f2`
-    mounttype=`echo $incoming | cut -d' ' -f3`
+    partno=$(echo "$incoming" | cut -d' ' -f1)
+    mountpt=$(echo "$incoming" | cut -d' ' -f2)
+    mounttype=$(echo "$incoming" | cut -d' ' -f3)
     mountdir="/mnt/RESTORING$mountpt"
     if [ "$mounttype" = "swap" ] ; then
-                swapon $partno
+                swapon "$partno"
     else
         if [ -e "$mountdir" ] && [ ! -d "$mountdir" ] ; then
             echo "$mountdir exists (but not a dir). Deleting..." 2
@@ -154,11 +192,12 @@ while [ "$incoming" != "" ] ; do
             echo "$mountdir mounted ok." 2
         echo "Mounting $partno..." 2
                 if [ -e "/tmp/MOUNT-READONLY" ] ; then
-            mount $partno -t $mounttype -o ro $mountdir
+
+           mount "$partno" -t "$mounttype" -o ro "$mountdir"
         else
-            mount $partno -t $mounttype $mountdir
+            mount "$partno" -t "$mounttype" "$mountdir"
         fi
-                res=`mount | grep "$partno"`
+                res=$(mount | grep "$partno")
                 if [ "$res" = "" ] ; then
                 echo "I think I failed to mount $partno" 3
                 else
@@ -176,12 +215,12 @@ echo "mount-subroutine-me --- leaving"
 
 }
 
-unmount-me() {
+unmount_me() {
 
 mountlist=/tmp/tmp/mountlist.txt
 
 if [ "$#" -ne "0" ] ;then
-    echo "unmount-me <no params>"
+    echo "unmount_me <no params>"
     echo "...mountlist is assumed to be at $mountlist"
     exit 1
 fi
@@ -190,28 +229,28 @@ fi
 #unmount-subroutine-me < $mountlist
 
 #for j in 1 2 ; do
-for i in `mount | grep /mnt/RESTORING | cut -d' ' -f3 | sort -r`; do
-    umount $i
+for i in $(mount | grep /mnt/RESTORING | cut -d' ' -f3 | sort -r); do
+    umount "$i"
 done
 
-for i in `cut -d' ' -f1 /proc/swaps | grep /dev`; do
-    swapoff $i
+for i in $(cut -d' ' -f1 /proc/swaps | grep /dev); do
+    swapoff "$i"
 done
 
 
 }
 
 runConfnet(){
-chroot $output_directory /bin/bash -c /tmp/postinstall.sh
-rm $output_directory/tmp/postinstall.sh
+chroot "$output_directory" /bin/bash -c /tmp/postinstall.sh
+rm "$output_directory/tmp/postinstall.sh"
 }
 createConfnet () {
 
 
-BROADCAST=$(ipcalc $ipaddress/$netmask | grep Broadcast | awk '{print $2}')
-NETWORK=$(ipcalc $ipaddress/$netmask | grep Network | awk '{print $2}' | awk -F "/" '{print $1}')
+BROADCAST=$(ipcalc "$ipaddress/$netmask" | grep Broadcast | awk '{print $2}')
+NETWORK=$(ipcalc "$ipaddress/$netmask" | grep Network | awk '{print $2}' | awk -F "/" '{print $1}')
 confnetFile="$output_directory/tmp/postinstall.sh"
-data=`date`
+data=$(date)
 
 confnetContent="
 #!/bin/bash
@@ -226,6 +265,7 @@ echo '=========                *****************************                    
 echo '=========                *****************************                      ========'
 echo '=========                                                                   ========'
 echo '===================================================================================='
+
 cat > /etc/sysconfig/network << EOF
 NETWORKING=yes
 NETWORKING_IPV6=no
@@ -280,7 +320,7 @@ service ntpd stop
 
 #@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@          End added for NET
 
-echo Installation number:  $salesOrder performed on $data >> /home/root/.syp_log 
+echo Installation number:  $salesOrder performed on $data >> /home/root/.syp_log
 
 "
 
@@ -297,7 +337,6 @@ fi
 
 }
 
-
 setILO () {
 ILO_hostname="ILO$hostname"
 ILO_pwd="Superuser"
@@ -306,7 +345,7 @@ ILO_mask=$ilonetmask
 ILO_gw=$gateway
 log INFO "Settings for ilo are: $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname"
 log INFO "Launching the command /usr/sbin/set_ilo.sh $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname"
-Set=$(/usr/sbin/set_ilo.sh $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname)
+Set=$(/usr/sbin/set_ilo.sh "$ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname")
 log INFO "Results for script: $Set"
 }
 
@@ -315,16 +354,16 @@ setProliantMirror () {
 
 #Check if there are two disks
 declare -i Disks
-Results=`hpssacli ctrl all  show config | grep physicaldrive | wc -l`
-Disks=$(echo $Results | sed 's/[^0-9]*//g')
+Disks=$(hpssacli ctrl all  show config | grep -c physicaldrive)
+#Diskt=$(echo $Results | sed 's/[^0-9]*//g')
 log INFO "Found $Disks physical disks on system"
 if [[ $Disks -eq 2 ]]; then
 log WARN "Building the mirror"
 Raid=$(hpssascripting -reset -i /home/partimag/HPRAIDTEMPLATES/hpssascripting1.ini)
 if [ $? -ne 0 ]; then
-        ERR="`cat error.ini`"
+        ERR="$(cat error.ini)"
         log WARN "The first applied template gives an error: $ERR . I'm going to apply the second one....."
-        Raid=$(hpassascripting -reset -i /home/partimag/HPRAIDTEMPLATES/acuoutput1.ini)
+        Raid=$(hpssascripting -reset -i /home/partimag/HPRAIDTEMPLATES/hpssascripting2.ini)
         if [ $? -ne 0 ]; then
                 log ERROR "I have two physical disks, but I could'nt build a mirror as asked. I'm exit right now"
                 error_exit "I have two physical disks, but I could'nt build a mirror as asked. I'm exit right now"
@@ -335,6 +374,24 @@ fi
 }
 
 #Functions to configure proliant servers
+
+
+setILOMIRROR () {
+# Settings for ILO and mirror of disks
+#mirroring is done if number of disk=2 and logical disk = 0
+ILO_hostname="ILO$hostname"
+ILO_pwd="Superuser"
+ILO_ip=$iloipaddress
+ILO_mask=$ilonetmask
+ILO_gw=$gateway
+log INFO "Settings for ilo are: $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname"
+log INFO "Launching the command /usr/sbin/set_ilo_mirror.sh $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname and mirroring eventually the disks"
+Set=$(set_ilo_mirror.sh $ILO_ip $ILO_mask $ILO_gw $ILO_pwd $ILO_hostname)
+log INFO "Results for script: $Set"
+}
+
+
+
 
 checkProliant () {
 
@@ -350,7 +407,6 @@ fi
 }
 
 SEND () {
-
 
 perl -e '
 use integer;
@@ -387,7 +443,7 @@ print $req->as_string;
 
 createMonitorRecord () {
  status="$1"
- PK="["$salesOrder"]["$rackPosition"]"
+ PK="[$salesOrder][$rackPosition]"
  URI="http://10.0.205.204/SPOT/provisioning/api/provisioningnotifications/$PK"
 
                             REST="{
@@ -407,27 +463,25 @@ createMonitorRecord () {
         \"serial\":\"$MACHSERIAL\",
         \"os\":\"RedHat\"
         }"
-        SEND 2>&1 >/dev/null
+        SEND > /dev/null 2>&1
 
 }
 
 LINUX_system () {
-HOST_NAME=$hostname
-        NUMPROC=`cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l`
-        MACHSERIAL=`dmidecode -s system-serial-number | grep -v '#'`
-        MANUFACTURER=`dmidecode -s system-manufacturer | grep -v '#'`
-        MODELTYPE=""
-        NETCOUNT=`/usr/share/drbl/bin/get-nic-devs | wc -l`
-        MODEL=`dmidecode -s system-product-name | grep -v '#'`
-        RAM_tot=`grep MemTotal /proc/meminfo | cut -d':' -f2 | cut -d 'k' -f1`
-        RAM_tot=`echo "$RAM_tot" | xargs`
-        RAM_tot=`expr $RAM_tot / 1000 `
+        NUMPROC=$(grep -c "physical id" </proc/cpuinfo | sort | uniq)
+        MACHSERIAL=$(dmidecode -s system-serial-number | grep -v '#')
+        MANUFACTURER=$(dmidecode -s system-manufacturer | grep -v '#')
+        NETCOUNT=$(/usr/share/drbl/bin/get-nic-devs | wc -l)
+        MODEL=$(dmidecode -s system-product-name | grep -v '#')
+        RAM_tot=$(grep MemTotal /proc/meminfo | cut -d':' -f2 | cut -d 'k' -f1)
+        RAM_tot=$(echo "$RAM_tot" | xargs)
+        RAM_tot=$(( RAM_tot / 1000 ))
 
-        NUMPROC=`echo "$NUMPROC" | xargs `
-        MACHSERIAL=`echo "$MACHSERIAL" | xargs`
-        MANUFACTURER=`echo "$MANUFACTURER" | xargs`
-        MODEL=`echo "$MODEL" | xargs`
-        DISKCOUNT=`lsblk -o NAME -i -d -n -e 1,11 | wc -l`
+        NUMPROC=$(echo "$NUMPROC" | xargs )
+        MACHSERIAL=$(echo "$MACHSERIAL" | xargs)
+        MANUFACTURER=$(echo "$MANUFACTURER" | xargs)
+        MODEL=$(echo "$MODEL" | xargs)
+        DISKCOUNT=$(lsblk -o NAME -i -d -n -e 1,11 | wc -l)
 }
 
 
@@ -450,7 +504,7 @@ grub-install --boot-directory=$output_directory/boot/grub /dev/sda
 [ ! -d $output_directory/sys ] && mkdir $output_directory/sys
 mount -t proc none $output_directory/proc
 mount -t sysfs sys $output_directory/sys
-chroot $output_directory /bin/bash -c "grub-install  /dev/sda && exit" && log INFO "Grub installed ok!!!!" || log ERR "Grub installation had errors"
+(chroot $output_directory /bin/bash -c "grub-install  /dev/sda && exit" && log INFO "Grub installed ok!!!!") || log ERR "Grub installation had errors"
 umount $output_directory/proc
 umount $output_directory/sys
 
@@ -498,7 +552,7 @@ help_message() {
 
   Options:
   --help  Display this help message and exit.
-  -pos Rack position or DHCP ip address of this client
+   -pos Rack position or DHCP ip address of this client
   -t  Mondoarchive iso image name (in lysis dir)
   -ip  Ip address to assign after restoration
   -n  Netmask
@@ -508,7 +562,7 @@ help_message() {
   -iloip  Ip address to assign to ilo
   -ilonm  Netmask for ilo
 
-  NOTE: 
+  NOTE:
          - You must be the superuser to run this script.
          - Only 2 parameters are mandatory:  -pos [Rack position/ Dhcp ip address] -t [ISO name]
          - Note that if the server is a Proliant, the mirror is automatically built if two disks are found
@@ -521,7 +575,8 @@ _EOF_
 log() {
 local level=${1?}
 shift
-local code= line="[$(date '+%F %T')] $level: $*"
+local code=0
+local line="[$(date '+%F %T')] $level: $*"
 if [ -t 2 ]
 then
 case "$level" in
@@ -539,7 +594,7 @@ fi >&2
 #LOG to web services
 #Create one section for each web service
 
-REST='{"title":"mondoWrapper | '$rackPosition'","content":"'$line'","userid":"'`whoami`'","date":"'`date`'"}'
+REST='{"title":"mondoWrapper | '$rackPosition'","content":"'$line'","userid":"'$(whoami)'","date":"'$(date)'"}'
 (
 perl - "$REST"  <<'_HERE_'
 use integer;
@@ -571,7 +626,7 @@ my $resp = $lwp->request($req);
 print $req->as_string;
 #print Dumper $resp;
 _HERE_
-)  2>&1 >/dev/null
+) > /dev/null 2>&1
 
 if [[ ! -z $rackPosition ]] && [[ ! -z $salesOrder ]]; then createMonitorRecord "$line"; fi
 
@@ -581,10 +636,10 @@ check_args() {
 #put here the mandatory params
 
 ([[ -z "$ISO"  ]] ) && log ERROR "Some mandatory parameters missing!!!!!" && usage && error_exit "Review the usage"
- valid_ip $ipaddress && [ "$ERROR" -ne 0 ] && log ERROR "Ip address not valid" && exit 1
- valid_ip $netmask && [ "$ERROR" -ne 0 ] && log ERROR "Netmask not valid" && exit 1
- valid_ip $gateway && [ "$ERROR" -ne 0 ] && log ERROR "Gateway not valid" && exit 1
- [[ ! -f $isoPATH/$ISO ]] && log ERROR "The image $ISO doesn't exist, please check the name" && log INFO "Possible values are:\n`ls $isoPATH | grep iso`" &&  exit 1
+ valid_ip "$ipaddress" && [ "$ERROR" -ne 0 ] && log ERROR "Ip address not valid" && exit 1
+ valid_ip "$netmask" && [ "$ERROR" -ne 0 ] && log ERROR "Netmask not valid" && exit 1
+ valid_ip "$gateway" && [ "$ERROR" -ne 0 ] && log ERROR "Gateway not valid" && exit 1
+ [[ ! -f "$isoPATH/$ISO" ]] && log ERROR "The image $ISO doesn't exist, please check the name" && log INFO "Possible values are:\n$(ls $isoPATH | grep iso)" &&  exit 1
  #check valid client
 
 }
@@ -595,7 +650,7 @@ ERROR=0
     oldIFS=$IFS
     IFS=.
     set -f
-    set -- $1
+    set -- "$1"
     if [ $# -eq 4 ]
     then
       for seg
@@ -632,39 +687,41 @@ exec_cmd()
 uncompress_afio()
 {
     exec_cmd "cd $output_directory"
-    exec_cmd "afio -i -v $ISO_MOUNT_DIR/archives/0.afio.bz2"
-    for afio_file in `ls $ISO_MOUNT_DIR/archives/*.afio.bz2`
+    exec_cmd "afio -i -x -v $ISO_MOUNT_DIR/archives/0.afio.bz2"
+    files=( $ISO_MOUNT_DIR/archives/*.afio.bz2 )
+    for afio_file in  "${files[@]}"
     do
-	log INFO "Decompressing $afio_file ...."
-        exec_cmd "afio -i -v  $afio_file"
+        log INFO "Decompressing $afio_file ...."
+        exec_cmd "afio -i -x -v  $afio_file"
     done
 }
-
 # uncompressing bz2 archives made by mondoarchive
 uncompress_bz2()
 {
     exec_cmd "cd $output_directory"
     PROGRESS="65"
     log INFO "Uncompressing bzip files..... be zen and wait..."
-  
+
     find -type f -name '*.z' -exec bunzip2 {} \; 2> /dev/null
     PROGRESS="75"
     log INFO "Renaming all *.z.out files...."
     find -type f -name '*.z.out' | while read f; do mv "$f" "${f%.z.out}"; done
+    log INFO "Set the right permission on system files:"
+    checkPermission
 }
 
 mondoRestore() {
 
 #Unmount unueseful dirs
-ismounted=$(cat /proc/mounts | grep $PACKAGER)
+ismounted=$(grep $PACKAGER < /proc/mounts)
 if [[ "$ismounted" != "" ]]; then
-	exec_cmd "umount $PACKAGER"
+        exec_cmd "umount $PACKAGER"
 fi
 
 iso_full_backup_path="$1"
 output_directory="$2"
 
-if [[ ! -d $ISO_MOUNT_DIR ]]
+if [[ ! -d "$ISO_MOUNT_DIR" ]]
 then
     exec_cmd "mkdir $ISO_MOUNT_DIR"
 fi
@@ -686,9 +743,9 @@ exec_cmd "umount $ISO_MOUNT_DIR"
 #Umount the lysis directory, we don't need anymore
 
 sleep 1
-ismounted=$(cat /proc/mounts | grep $isoPATH)
+ismounted=$(grep " $isoPATH" < /proc/mounts)
 if [[ "$ismounted" != "" ]]; then
-	exec_cmd "umount $isoPATH"
+        exec_cmd "umount $isoPATH"
 fi
 
 
@@ -709,7 +766,6 @@ trap "signal_exit INT"  INT
 if [[ $(id -u) != 0 ]]; then
   error_exit "You must be the superuser to run this script."
 fi
-
 # Parse command-line
 while [[ -n $1 ]]; do
   case $1 in
@@ -717,27 +773,27 @@ while [[ -n $1 ]]; do
       help_message; graceful_exit ;;
     -pos)
         rackPosition="$2"
-	log INFO "Rack position / Dhcp ip address: $rackPosition";;
+        log INFO "Rack position / Dhcp ip address: $rackPosition";;
     -t)
-	ISO="$2"
+        ISO="$2"
       log INFO "mondoarchive iso image: $ISO" ;;
     -ip)
-	ipaddress="$2"
+        ipaddress="$2"
       log INFO "Ip address to assign after restoration: $ipaddress" ;;
     -n)
-	netmask="$2" # You may want to check validity of $2
+        netmask="$2" # You may want to check validity of $2
       log INFO "Netmask: $netmask" ;;
     -g)
-	gateway="$2"   # You may want to check validity of $2
+        gateway="$2"   # You may want to check validity of $2
       log INFO "Gateway: $gateway" ;;
     -s)
-	salesOrder="$2" # You may want to check validity of $2
+        salesOrder="$2" # You may want to check validity of $2
       log INFO "Sales order number (if any): $salesOrder" ;;
     -h)
-	hostname="$2"   # You may want to check validity of $2
+        hostname="$2"   # You may want to check validity of $2
       log INFO "Hostname: $hostname" ;;
     -iloip)
-	iloipaddress="$2"
+        iloipaddress="$2"
       log INFO "Ip address to assign to ilo: $iloipaddress" ;;
     -ilonm)
         ilonetmask="$2"
@@ -756,11 +812,11 @@ check_args
 log INFO "Set defaults value if not specified in command line..."
 # Set the defaults values
 [[ -z "$hostname" ]] && hostname="nagrasrv01"                                                   && log INFO "Set the hostname to '$hostname'"
-[[ -z "$ipaddress" ]] && ipaddress=$(echo "10.0.133.$((RANDOM%=255))")                          && log INFO "Set the ip address to '$ipaddress'"
+[[ -z "$ipaddress" ]] && ipaddress="10.0.133.$((RANDOM%=255))"                          && log INFO "Set the ip address to '$ipaddress'"
 [[ -z "$netmask" ]] && netmask="255.255.255.0"                                                  && log INFO "Set the netmask to '$netmask'"
 [[ -z "$gateway" ]] && gateway="10.0.133.252"                                                   && log INFO "Set the gateway to '$gateway'"
 [[ -z "$ilohostname" ]] && ilohostname="ILO$hostname"                                           && log INFO "Assuming ilo hostname for proliant server equal to '$ilohostname'"
-[[ -z "$iloipaddress" ]] && iloipaddress=$(echo "10.0.133.$((RANDOM%=255))")                    && log INFO "Assuming ilo ip address for proliant server equal to '$iloipaddress'"
+[[ -z "$iloipaddress" ]] && iloipaddress="10.0.133.$((RANDOM%=255))"                    && log INFO "Assuming ilo ip address for proliant server equal to '$iloipaddress'"
 [[ -z "$ilonetmask" ]] && ilonetmask="255.255.255.0"                                            && log INFO "Assuming ilo netmask for proliant server equal to '$ilonetmask'"
 [[ -z "$salesOrder" ]] && salesOrder="99999999"                                                 && log INFO "Set sales order to '$salesOrder'"
 
@@ -784,13 +840,14 @@ proliant=$(checkProliant)
 if [[ "$proliant" == "OK" ]]; then
 #Set ILO configuration
 PROGRESS=10
-log INFO "Set the ILO ip"
+#log INFO "Set the ILO ip"
 
-setILO
+#setILO
 #do the mirror!
 PROGRESS=15
-log INFO "Creating the mirror if needed"
-setProliantMirror
+#log INFO "Creating the mirror if needed"
+#setProliantMirror
+setILOMIRROR
 fi
 
 #the SSH execution is assured in the function
@@ -803,7 +860,7 @@ LINUX_system
 #mount the iso to explore partitions list
 PROGRESS=25
 log INFO "Mounting the iso $iso_full_input_path ....."
-mount $iso_full_input_path $ISO_MOUNT_DIR
+mount "$iso_full_input_path" "$ISO_MOUNT_DIR"
 
 PROGRESS=30
 log INFO "Extracting additional files ..."
@@ -812,7 +869,7 @@ umount $ISO_MOUNT_DIR
 PROGRESS=35
 log INFO "Checking disk configuration"
 
-SDA=`cat /tmp/tmp/mountlist.txt | grep sda`
+SDA=$(grep sda < /tmp/tmp/mountlist.txt)
         if [[ "$SDA" == "" ]]; then
                 log INFO "Creating symbolic link to c0d0"
                 SDA="c0d0"
@@ -832,7 +889,7 @@ SDA=`cat /tmp/tmp/mountlist.txt | grep sda`
 #first create partitions
 PROGRESS=40
 log INFO "About to partition hdisk"
-fdisk $SDA  < $mount_directory/fdisk.txt  2>&1 >/dev/null
+fdisk $SDA  < $mount_directory/fdisk.txt > /dev/null 2>&1
 # call partprobe to get new layout "
 PROGRESS=45
 log INFO "Informing the kernel on partition table changes.."
@@ -840,20 +897,20 @@ partprobe
 #Run I want my lvm to create lvm layout
 PROGRESS=50
 log INFO "Creating LVM layout"
-i-want-my-lvm  $SDA1 $SDA2 2>&1 >/dev/null
+i_want_my_lvm  $SDA1 $SDA2 > /dev/null 2>&1
 #Mount all partitions
 PROGRESS=55
 log INFO "Mount all new created partitions"
-mount-me
+mount_me
 #exec_cmd "mount -t nfs $nfs_server $mount_directory"
-mondoRestore  $iso_full_input_path  $output_directory
+mondoRestore  "$iso_full_input_path"  "$output_directory"
 
 # Modify fstab
 PROGRESS=85
 log INFO "Adjust /boot partition in fstab definition ...."
-cp $output_directory/etc/fstab $output_directory/etc/fstab.old
-UUID=`cat $output_directory/etc/fstab | grep "boot" | awk '{print $1}'`
-sed  -i "s*$UUID*$SDA1*g"  $output_directory/etc/fstab
+cp "$output_directory/etc/fstab" "$output_directory/etc/fstab.old"
+UUID=$(grep "boot" < "$output_directory/etc/fstab" | awk '{print $1}')
+sed  -i "s*$UUID*$SDA1*g"  "$output_directory/etc/fstab"
 
 # Set locale
 PROGRESS=90
@@ -867,12 +924,12 @@ log INFO "Running configuration file in chrooted environment"
 runConfnet
 
 # Install Grub
-InstallGrub 
+InstallGrub
 
 #unmount /mnt/RESTORING
 log INFO "Unmounting the partitions"
 cd /tmp # Just in case
-unmount-me
+unmount_me
 
 PROGRESS=100
 # Reboot to installed image
